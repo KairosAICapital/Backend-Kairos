@@ -28,7 +28,8 @@ from api.utils import (
     obtener_noticias_recientes,
     obtener_precio_ticker,
     extract_ticker,
-    calculate_portfolio_values_for_user
+    calculate_portfolio_values_for_user,
+    obtener_noticias_ticker
 )
 
 from rest_framework import viewsets, status
@@ -84,30 +85,15 @@ class MarketNewsViewSet(viewsets.ModelViewSet):
     queryset = MarketNews.objects.all()
     serializer_class = MarketNewsSerializer
 
-
-
-import json
-import bleach
-from datetime import datetime
-from html import escape
-
-from django.http import JsonResponse, StreamingHttpResponse
-from django.utils.timezone import now
-from rest_framework.decorators import api_view, authentication_classes, permission_classes
-from rest_framework.permissions import IsAuthenticated
-from rest_framework_simplejwt.authentication import JWTAuthentication
-
-from .models import Chat  # Asegurate de que tu modelo esté importado
-from .utils import generar_titulo, clasificar_pregunta, extract_ticker, obtener_noticias_recientes, obtener_precio_ticker
-
-import openai 
-
 # Obtener la API key de OpenAI desde variables de entorno
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# A este chatbot_response le agregué sanitización en user_email y en user_input antes de procesarlos.
-# Escapé la respuesta del chatbot con escape() antes de enviarla al frontend.
-# Y escapé la conversación antes de guardarla en la base de datos.
+from openai.types.beta.threads import RunSubmitToolOutputsRequest
+from openai.types.beta import Thread
+from openai.types.shared_params import FunctionDefinition
+from django.views.decorators.csrf import csrf_exempt
+
+from api.utils import obtener_noticias_ticker_tool  # Asegúrate de tener esta función definida
 
 @api_view(["POST"])
 @authentication_classes([JWTAuthentication])
@@ -115,19 +101,15 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 def chatbot_response(request):
     if request.method == "POST":
         try:
-            # Obtener datos del request
             data = json.loads(request.body)
             user_input = bleach.clean(data.get("message", "")).strip()
             chat_title = bleach.clean(data.get("chat_title", "")).strip()
-
-            user = request.user  # ✅ Usuario autenticado por JWT
+            user = request.user
 
             if not user_input:
                 return JsonResponse({"error": "Falta el mensaje del usuario"}, status=400)
 
-            # 🔹 Lógica para reutilizar chat o crear uno nuevo
             chat = None
-
             if chat_title:
                 chat = Chat.objects.filter(user=user, title=chat_title).order_by("-time").first()
             else:
@@ -136,16 +118,11 @@ def chatbot_response(request):
                     chat_title = chat.title
 
             num_messages = Chat.objects.filter(user=user, title=chat_title).count() if chat else 0
-
             if not chat or num_messages >= 20:
                 chat_title = generar_titulo(user_input)
                 chat = Chat.objects.create(user=user, time=now(), title=chat_title, conversation="[]")
-                print(f"📌 Nuevo chat creado: {chat_title}")
-            else:
-                print(f"📌 Usando chat existente: {chat_title} con {num_messages} mensajes")
 
             chat_history = Chat.objects.filter(user=user, title=chat_title).order_by("-time")[:20]
-
             chat_context = []
             for message in reversed(chat_history):
                 try:
@@ -158,99 +135,69 @@ def chatbot_response(request):
 
             chat_context.append({"role": "user", "content": user_input})
 
-            print("\n🔎 DEBUG: Contexto enviado a la LLM:")
-            for msg in chat_context:
-                print(f"  - {msg['role']}: {msg['content'][:200]}")
-            print("\n")
-
             if not OPENAI_API_KEY:
                 return JsonResponse({"error": "API key de OpenAI no configurada"}, status=500)
 
-            es_financiera = clasificar_pregunta(user_input, contexto_chat=json.dumps(chat_context))
-            if not es_financiera:
-                return JsonResponse({"error": "La pregunta no está relacionada con finanzas o economía."}, status=400)
-
-            noticias = []
-            precios = []
-            ticker = extract_ticker(user_input)
-
-            if "noticias" in user_input.lower() or "últimas noticias" in user_input.lower():
-                if ticker:
-                    noticias = obtener_noticias_recientes(ticker)
-            elif "precio de" in user_input.lower():
-                if ticker:
-                    precios = obtener_precio_ticker(ticker)
-
-            if noticias:
-                Chat.objects.create(
-                    user=user,
-                    time=datetime.now(),
-                    title=chat_title,
-                    conversation=json.dumps({
-                        "question": user_input,
-                        "response": f"Últimas noticias del mercado: {json.dumps(noticias)}"
-                    })
-                )
-            elif precios:
-                Chat.objects.create(
-                    user=user,
-                    time=datetime.now(),
-                    title=chat_title,
-                    conversation=json.dumps({
-                        "question": user_input,
-                        "response": f"Precios históricos: {json.dumps(precios)}"
-                    })
-                )
-
             system_prompt = (
                 "Eres Kairos, un asesor financiero digital confiable, empático y bien informado, diseñado para guiar a personas de Latinoamérica (especialmente Uruguay) en su camino hacia una mejor salud financiera."
-                "Tu estilo es claro, conversacional y profesional. Usás un lenguaje simple pero preciso. Acompañás al usuario en cada paso, adaptándote a su nivel de conocimiento: si es principiante, explicás desde lo básico con ejemplos cotidianos; si demuestra experiencia, puedes ir más al grano y usar términos más técnicos (siempre bien explicados)."
-                "Tu objetivo no es decirle al usuario qué hacer, sino ayudarlo a entender cómo funcionan las inversiones, qué opciones tiene según su perfil de riesgo y cómo puede tomar decisiones informadas. No das consejos financieros personalizados ni recomendaciones de compra/venta, pero sí explicás estrategias, productos financieros y principios económicos con enfoque educativo."
-                "Si el usuario te pide un resumen de la conversación, usa el historial de mensajes para generar un resumen preciso."
+                "Tu estilo es claro, conversacional y profesional. Usás un lenguaje simple pero preciso. Acompañás al usuario en cada paso, adaptándote a su nivel de conocimiento."
+                "No das consejos financieros personalizados, pero sí explicás estrategias, productos financieros y principios económicos con enfoque educativo."
+                "Si el usuario menciona una empresa o ticker y pide novedades, deberás usar la herramienta 'obtener_noticias_ticker' para responder con información actualizada."
             )
 
             chat_context.insert(0, {"role": "system", "content": system_prompt})
+            
 
-            if noticias:
-                noticias = noticias[:3]
-                chat_context.append({"role": "system", "content": f"Últimas noticias del mercado: {json.dumps(noticias)}"})
-            if precios:
-                precios = precios[-5:]
-                precios_texto = "\n".join([f"{p['time']}: {p['price']}" for p in precios])
-                chat_context.append({"role": "system", "content": f"Aquí están los últimos precios de {ticker}:\n{precios_texto}"})
+            tools = [obtener_noticias_ticker_tool]
+
 
             client = openai.OpenAI(api_key=OPENAI_API_KEY)
-            full_response_container = {"content": ""}
 
-            def stream_openai_response():
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=chat_context,
-                    stream=True
-                )
-                for chunk in response:
-                    delta = chunk.choices[0].delta
-                    if "content" in delta:
-                        content_piece = delta.content
-                        full_response_container["content"] += content_piece
-                        yield content_piece
+            response = client.chat.completions.create(
+                model="gpt-4o",
+                messages=chat_context,
+                tools=tools,
+                tool_choice="auto",
+                stream=False
+            )
 
-            stream_response = StreamingHttpResponse(stream_openai_response(), content_type="text/plain")
+            first_choice = response.choices[0]
 
-            def guardar_respuesta_despues():
-                if es_financiera:
-                    Chat.objects.create(
-                        user=user,
-                        time=datetime.now(),
-                        title=chat_title,
-                        conversation=json.dumps({
-                            "question": escape(user_input),
-                            "response": escape(full_response_container["content"])
-                        })
+            if first_choice.finish_reason == "tool_calls":
+                tool_call = first_choice.message.tool_calls[0]
+                function_name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+
+                if function_name == "obtener_noticias_ticker":
+                    noticias = obtener_noticias_ticker(arguments["ticker"])
+
+                    chat_context.append({"role": "assistant", "tool_call_id": tool_call.id, "content": None, "tool_calls": [tool_call.dict()]})
+                    chat_context.append({"role": "tool", "tool_call_id": tool_call.id, "name": "obtener_noticias_ticker", "content": json.dumps(noticias)})
+
+                    final_response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=chat_context,
+                        stream=False
                     )
+                    content = final_response.choices[0].message.content
+                else:
+                    content = "La herramienta solicitada no está implementada."
+            else:
+                content = first_choice.message.content
 
-            stream_response.add_post_render_callback(lambda r: guardar_respuesta_despues())
-            return stream_response
+            bot_response_safe = escape(content)
+
+            Chat.objects.create(
+                user=user,
+                time=datetime.now(),
+                title=chat_title,
+                conversation=json.dumps({
+                    "question": escape(user_input),
+                    "response": bot_response_safe
+                })
+            )
+
+            return JsonResponse({"response": bot_response_safe, "title": chat_title}, status=200)
 
         except json.JSONDecodeError:
             return JsonResponse({"error": "Error en el formato JSON"}, status=400)

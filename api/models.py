@@ -41,6 +41,7 @@ class ClientData(AbstractBaseUser, PermissionsMixin):
     email_alternative = models.EmailField(max_length=255, blank=True, null=True)
     phone_number = models.CharField(max_length=50)
     dob = models.DateField()
+    fecha_registro = models.DateTimeField(auto_now_add=True)
 
     perfil_riesgo = models.CharField(
         max_length=50, 

@@ -291,26 +291,26 @@ import datetime
 import json
 from django.utils.timezone import now 
 
-def obtener_noticias_recientes(ticker=None):
-    """
-    Obtiene las últimas noticias del mercado.
-    """
-    if ticker:
-        noticias = MarketNews.objects.filter(tickers__icontains=ticker).order_by('-time')
-    else:
-        noticias = MarketNews.objects.order_by('-time')
+# def obtener_noticias_recientes(ticker=None):
+#     """
+#     Obtiene las últimas noticias del mercado.
+#     """
+#     if ticker:
+#         noticias = MarketNews.objects.filter(tickers__icontains=ticker).order_by('-time')
+#     else:
+#         noticias = MarketNews.objects.order_by('-time')
 
-    if not noticias.exists():  # ⚠️ Si no hay noticias, evitar el error
-        print(f"⚠️ No se encontraron noticias para {ticker}")
-        return []
+#     if not noticias.exists():  # ⚠️ Si no hay noticias, evitar el error
+#         print(f"⚠️ No se encontraron noticias para {ticker}")
+#         return []
 
-    return [
-        {
-            "time": noticia.time.strftime("%Y-%m-%d %H:%M:%S") if noticia.time else "Fecha no disponible",
-            "news": noticia.news
-        }
-        for noticia in noticias
-    ]
+#     return [
+#         {
+#             "time": noticia.time.strftime("%Y-%m-%d %H:%M:%S") if noticia.time else "Fecha no disponible",
+#             "news": noticia.news
+#         }
+#         for noticia in noticias
+#     ]
 
 
 def obtener_precio_ticker(ticker):
@@ -333,22 +333,71 @@ def obtener_precio_ticker(ticker):
 
 
 
+from .models import MarketNews
+from datetime import datetime, timedelta
+
+def obtener_noticias_ticker(ticker: str, limite: int = 5):
+    """
+    Devuelve las noticias más recientes asociadas a un ticker.
+
+    Parámetros:
+    - ticker (str): símbolo del ticker (e.g. "AAPL").
+    - limite (int): número máximo de noticias a retornar.
+
+    Retorna:
+    - Lista de diccionarios con campos relevantes.
+    """
+    if not ticker:
+        return []
+
+    # Filtra noticias que contengan el ticker (uso de icontains por seguridad)
+    noticias = (
+        MarketNews.objects
+        .filter(tickers__icontains=ticker.upper())
+        .order_by("-time")[:limite]
+    )
+
+    return [
+        {
+            "fecha": noticia.time.strftime("%Y-%m-%d %H:%M"),
+            "resumen": noticia.news[:300] + ("..." if len(noticia.news) > 300 else ""),
+            "sentimiento": noticia.sentiment_class,
+            "score": noticia.sentiment_score,
+        }
+        for noticia in noticias
+    ]
+
+
 
 import re
 
-def extract_ticker(user_input):
-    """
-    Extrae el símbolo del ticker desde el mensaje del usuario.
-    """
-    # Expresión regular para buscar tickers de bolsa (usualmente en mayúsculas y de 1 a 5 caracteres)
-    pattern = r'\b[A-Z]{1,5}\b'
-    
-    # Buscar posibles tickers en el mensaje
-    matches = re.findall(pattern, user_input)
+from openai.types.beta.tools import FunctionDefinition
 
-    # Filtrar palabras comunes que no son tickers
-    stop_words = {"USD", "EUR", "AÑO", "MES", "DÍA", "DAME", "NOTICIAS", "PRECIO", "DE", "Y", "PARA", "LOS", "ÚLTIMOS"}
-    tickers = [match for match in matches if match not in stop_words]
+obtener_noticias_ticker_tool = FunctionDefinition(
+    name="obtener_noticias_ticker",
+    description="Obtiene las noticias más recientes relacionadas con una empresa financiera o ticker bursátil mencionado por el usuario. Ideal para preguntas como: '¿Qué se dice de Tesla?' o '¿Hay novedades sobre AAPL?'.",
+    parameters={
+        "type": "object",
+        "properties": {
+            "ticker": {
+                "type": "string",
+                "description": "Símbolo bursátil de la empresa, por ejemplo, AAPL, TSLA, NVDA, etc."
+            }
+        },
+        "required": ["ticker"]
+    }
+)
 
-    # Si hay al menos un ticker, devolver el primero
-    return tickers[0] if tickers else None
+
+# extract_ticker_tool = FunctionDefinition(
+#     name="extract_ticker",
+#     description="Extrae un ticker del mensaje del usuario si es posible.",
+#     parameters={
+#         "type": "object",
+#         "properties": {
+#             "mensaje": {"type": "string", "description": "Texto completo del usuario"}
+#         },
+#         "required": ["mensaje"]
+#     }
+# )
+
