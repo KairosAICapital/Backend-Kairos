@@ -389,15 +389,47 @@ obtener_noticias_ticker_tool = FunctionDefinition(
 )
 
 
-# extract_ticker_tool = FunctionDefinition(
-#     name="extract_ticker",
-#     description="Extrae un ticker del mensaje del usuario si es posible.",
-#     parameters={
-#         "type": "object",
-#         "properties": {
-#             "mensaje": {"type": "string", "description": "Texto completo del usuario"}
-#         },
-#         "required": ["mensaje"]
-#     }
-# )
+from .models import ClientData, Portfolio
+from decimal import Decimal
+
+def obtener_datos_usuario(user) -> dict:
+    try:
+        client = ClientData.objects.get(id=user.id)
+        portfolio = Portfolio.objects.filter(client=client)
+
+        return {
+            "perfil_riesgo": client.perfil_riesgo,
+            "valor_portfolio": float(client.portfolio_value) if client.portfolio_value else None,
+            "ultima_actualizacion": client.last_value_update.strftime("%Y-%m-%d %H:%M") if client.last_value_update else None,
+            "composicion_portfolio": [
+                {
+                    "ticker": p.ticker,
+                    "peso": round(p.weight, 2),
+                    "acciones": float(p.shares) if p.shares else None,
+                    "precio_compra": float(p.purchase_price) if p.purchase_price else None,
+                }
+                for p in portfolio
+            ]
+        }
+    except ClientData.DoesNotExist:
+        return {"error": "Usuario no encontrado"}
+    
+
+def formatear_contexto_usuario(user) -> str:
+    datos = obtener_datos_usuario(user)
+
+    if "error" in datos:
+        return "No se pudo obtener información del usuario."
+
+    resumen = f"""Este usuario tiene un perfil de riesgo **{datos['perfil_riesgo']}**.
+El valor actual de su portafolio es de **${datos['valor_portfolio']}**, última actualización: {datos['ultima_actualizacion']}.
+Su portafolio incluye las siguientes posiciones:"""
+
+    for item in datos["composicion_portfolio"]:
+        resumen += (
+            f"\n- {item['ticker']}: {item['acciones']} acciones, peso {item['peso']}%, "
+            f"precio de compra ${item['precio_compra']}"
+        )
+
+    return resumen
 

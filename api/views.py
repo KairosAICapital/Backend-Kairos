@@ -93,7 +93,7 @@ from openai.types.beta import Thread
 from openai.types.shared_params import FunctionDefinition
 from django.views.decorators.csrf import csrf_exempt
 
-from api.utils import obtener_noticias_ticker_tool  # Asegúrate de tener esta función definida
+from api.utils import obtener_noticias_ticker_tool, formatear_contexto_usuario  # Asegúrate de tener esta función definida
 
 @api_view(["POST"])
 @authentication_classes([JWTAuthentication])
@@ -135,6 +135,12 @@ def chatbot_response(request):
 
             chat_context.append({"role": "user", "content": user_input})
 
+            es_financiera = clasificar_pregunta(user_input, contexto_chat=json.dumps(chat_context))
+
+            if not es_financiera:
+                return JsonResponse({"error": "La pregunta no está relacionada con finanzas o economía."}, status=400)
+
+
             if not OPENAI_API_KEY:
                 return JsonResponse({"error": "API key de OpenAI no configurada"}, status=500)
 
@@ -145,11 +151,17 @@ def chatbot_response(request):
                 "Si el usuario menciona una empresa o ticker y pide novedades, deberás usar la herramienta 'obtener_noticias_ticker' para responder con información actualizada."
             )
 
+            # Inyección del system prompt
             chat_context.insert(0, {"role": "system", "content": system_prompt})
-            
+
+            # Inyección del contexto personalizado del usuario
+            contexto_usuario = formatear_contexto_usuario(user)
+            chat_context.insert(1, {
+                "role": "user",
+                "content": f"[Contexto del usuario]\n{contexto_usuario}"
+            })
 
             tools = [obtener_noticias_ticker_tool]
-
 
             client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
